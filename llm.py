@@ -116,13 +116,13 @@ class Muon(torch.optim.Optimizer):
                 p.add_(g.view_as(p), alpha=-group["lr"] * max(1, p.size(-2) / p.size(-1))**0.5)
 	
 def load_and_cache_data(config: ModelConfig, cache_dir: str = "data_cache"):
-    """Load and cache tokenized data to avoid reprocessing"""
+    """Load and cache Nemotron-CC-Math dataset"""
     os.makedirs(cache_dir, exist_ok=True)
-    cache_file = f"{cache_dir}/tokenized_data_{config.num_documents}_{config.max_tokens}.pkl"
+    cache_file = f"{cache_dir}/nemotron_math_data_{config.num_documents}_{config.max_tokens}.pkl"
 
     # Check if cached data exists
     if os.path.exists(cache_file):
-        print(f"📦 Loading cached data from {cache_file}")
+        print(f"📦 Loading cached Nemotron-CC-Math data from {cache_file}")
         with open(cache_file, 'rb') as f:
             cached_data = pickle.load(f)
 
@@ -131,36 +131,53 @@ def load_and_cache_data(config: ModelConfig, cache_dir: str = "data_cache"):
         tokens = cached_data['tokens']
         config.vocab_size = tokenizer.vocab_size
 
-        print(f"✅ Loaded {len(texts)} documents, {len(tokens):,} tokens from cache")
+        print(f"✅ Loaded {len(texts)} math documents, {len(tokens):,} tokens from cache")
         return texts, tokenizer, tokens
 
-    print(f"🔄 Processing new data (will cache for future use)")
+    print(f"🔄 Loading Nemotron-CC-Math dataset (will cache for future use)")
 
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM-135M", token=False)
+    # Load tokenizer - using a math-friendly tokenizer
+    tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-medium", token=False)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Load dataset
-    dataset = load_dataset("HuggingFaceTB/smollm-corpus", "cosmopedia-v2", split="train", streaming=True, token=False)
+    # Load Nemotron-CC-Math dataset - using the high-quality 4plus subset
+    print("📚 Loading NVIDIA Nemotron-CC-Math dataset...")
+    try:
+        dataset = load_dataset("nvidia/Nemotron-CC-Math-v1", "4plus", split="train", streaming=True, token=False)
+    except Exception as e:
+        print(f"⚠️ Could not load Nemotron dataset ({e}), falling back to OpenWebMath...")
+        dataset = load_dataset("open-web-math/open-web-math", split="train", streaming=True, token=False)
 
     texts = []
-    for i, item in enumerate(dataset):
+    print(f"🔢 Processing math documents...")
+    for i, item in enumerate(tqdm(dataset, desc="Loading math docs", total=config.num_documents)):
         if i >= config.num_documents:
             break
-        texts.append(item["text"][:3000])
+        
+        # Extract text content - handle different dataset formats
+        if "text" in item:
+            text_content = item["text"]
+        elif "content" in item:
+            text_content = item["content"]
+        else:
+            # Fallback: concatenate all string values
+            text_content = " ".join([str(v) for v in item.values() if isinstance(v, str)])
+        
+        # Take longer sequences for math content (up to 8000 chars)
+        texts.append(text_content[:8000])
 
-    print(f"Loaded {len(texts)} documents")
+    print(f"📊 Loaded {len(texts)} math documents")
 
     # Tokenize
-    print("Tokenizing texts...")
+    print("🔤 Tokenizing math texts...")
     all_tokens = []
-    for text in tqdm(texts, desc="Tokenizing"):
-        tokens = tokenizer.encode(text, add_special_tokens=False)
+    for text in tqdm(texts, desc="Tokenizing math content"):
+        tokens = tokenizer.encode(text, add_special_tokens=False, max_length=config.max_seq_len, truncation=True)
         all_tokens.extend(tokens)
 
     tokens = all_tokens[:config.max_tokens]
-    print(f"Using {len(tokens):,} tokens")
+    print(f"✨ Using {len(tokens):,} math tokens")
     config.vocab_size = tokenizer.vocab_size
 
     # Cache the processed data
@@ -168,7 +185,7 @@ def load_and_cache_data(config: ModelConfig, cache_dir: str = "data_cache"):
     with open(cache_file, 'wb') as f:
         pickle.dump(cached_data, f)
 
-    print(f"💾 Cached data to {cache_file}")
+    print(f"💾 Cached math data to {cache_file}")
     return texts, tokenizer, tokens
 
 class TextTokenDataset(Dataset):
@@ -353,8 +370,29 @@ def setup_muon_optimizer(model: nn.Module, config: ModelConfig):
     return [muon_optimizer, adamw_optimizer]
 
 def train_model(config: ModelConfig, train_loader: DataLoader, val_loader: DataLoader):
-    """Train the model with Muon optimizer"""
-    print(f"\n🚀 Training Small model with Muon optimizer")
+    """Train the model with Muon optimizer and Wandb logging"""
+    print(f"\n🚀 Training Math LLM with Nemotron-CC-Math dataset")
+
+    # Initialize Weights & Biases
+    wandb.init(
+        project=config.wandb_project,
+        name=config.wandb_run_name or f"math-llm-{config.d_model}d-{config.n_layers}L",
+        config={
+            "model_size": f"{config.d_model}d_{config.n_layers}L_{config.n_heads}H",
+            "d_model": config.d_model,
+            "n_layers": config.n_layers,
+            "n_heads": config.n_heads,
+            "d_ff": config.d_ff,
+            "batch_size": config.batch_size,
+            "max_steps": config.max_steps,
+            "muon_lr": config.muon_lr,
+            "max_seq_len": config.max_seq_len,
+            "dataset": "nemotron-cc-math-4plus",
+            "optimizer": "muon+adamw",
+            "max_tokens": config.max_tokens,
+            "num_documents": config.num_documents
+        }
+    )
 
     # Initialize model
     set_seed(42)
@@ -364,6 +402,7 @@ def train_model(config: ModelConfig, train_loader: DataLoader, val_loader: DataL
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"  📊 Total parameters: {total_params:,}")
+    wandb.log({"total_parameters": total_params})
 
     # Setup optimizers
     optimizers = setup_muon_optimizer(model, config)
@@ -440,12 +479,22 @@ def train_model(config: ModelConfig, train_loader: DataLoader, val_loader: DataL
                     accuracy = (predictions == y).float().mean().item()
                     current_loss = loss.item() * config.gradient_accumulation_steps
                     perplexity = math.exp(min(current_loss, 20))
+                    current_lr = optimizers[0].param_groups[0]["lr"]
+
+                # Log to Wandb
+                wandb.log({
+                    "train/loss": current_loss,
+                    "train/accuracy": accuracy,
+                    "train/perplexity": perplexity,
+                    "train/learning_rate": current_lr,
+                    "train/step": step
+                })
 
                 pbar.set_postfix({
                     'loss': f'{current_loss:.4f}',
                     'acc': f'{accuracy:.3f}',
                     'ppl': f'{perplexity:.1f}',
-                    'lr': f'{optimizers[0].param_groups[0]["lr"]:.2e}'
+                    'lr': f'{current_lr:.2e}'
                 })
 
             # Evaluation
@@ -455,8 +504,17 @@ def train_model(config: ModelConfig, train_loader: DataLoader, val_loader: DataL
                       f"Val Acc: {eval_metrics['val_accuracy']:.4f}, "
                       f"Val PPL: {eval_metrics['val_perplexity']:.2f}")
 
+                # Log validation metrics to Wandb
+                wandb.log({
+                    "val/loss": eval_metrics['val_loss'],
+                    "val/accuracy": eval_metrics['val_accuracy'],
+                    "val/perplexity": eval_metrics['val_perplexity'],
+                    "val/step": step
+                })
+
                 if eval_metrics['val_loss'] < best_val_loss:
                     best_val_loss = eval_metrics['val_loss']
+                    wandb.log({"val/best_loss": best_val_loss})
 
             step += 1
             if step % 100 == 0:
@@ -472,6 +530,21 @@ def train_model(config: ModelConfig, train_loader: DataLoader, val_loader: DataL
     print(f"  📊 Final - Loss: {final_eval['val_loss']:.4f}, "
           f"Acc: {final_eval['val_accuracy']:.4f}, PPL: {final_eval['val_perplexity']:.2f}")
 
+    # Log final metrics to Wandb
+    wandb.log({
+        "final/loss": final_eval['val_loss'],
+        "final/accuracy": final_eval['val_accuracy'],
+        "final/perplexity": final_eval['val_perplexity'],
+        "final/training_time_minutes": training_time / 60,
+        "final/steps_completed": step
+    })
+
+    # Save model summary
+    wandb.watch(model, log="all", log_freq=1000)
+    
+    # Finish wandb run
+    wandb.finish()
+
     return model, final_eval
 
 if __name__ == "__main__":
@@ -484,12 +557,14 @@ if __name__ == "__main__":
     # Set seed
     set_seed(42)
 
-    # Create config for Small model
+    # Create config for Math LLM with Nemotron dataset
     config = ModelConfig()
-    print(f"\n📋 Model Configuration:")
+    print(f"\n📋 Math LLM Configuration:")
     print(f"   Architecture: {config.d_model}d, {config.n_layers}L, {config.n_heads}H, {config.d_ff}ff")
     print(f"   Training: {config.max_steps} steps, batch size {config.batch_size}")
     print(f"   Data: {config.max_tokens:,} tokens, seq_len {config.max_seq_len}")
+    print(f"   Dataset: Nemotron-CC-Math (high-quality math corpus)")
+    print(f"   Logging: Weights & Biases project '{config.wandb_project}'")
 
     # Load data
     texts, tokenizer, tokens = load_and_cache_data(config)
