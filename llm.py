@@ -18,6 +18,9 @@ import pickle
 import wandb
 warnings.filterwarnings('ignore')
 
+# Fix tokenizer parallelism warnings
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 def set_seed(seed: int = 42):
     """Set all random seeds for reproducibility"""
     random.seed(seed)
@@ -36,7 +39,7 @@ class ModelConfig:
     n_layers: int = 12
     d_ff: int = 3072
     batch_size: int = 16  # Reduced due to larger model
-    max_steps: int = 8000  # More steps for math learning
+    max_steps: int = 300  # More steps for math learning
 
     # Training parameters
     gradient_accumulation_steps: int = 8  # Increased for larger effective batch size
@@ -136,10 +139,12 @@ def load_and_cache_data(config: ModelConfig, cache_dir: str = "data_cache"):
 
     print(f"🔄 Loading Nemotron-CC-Math dataset (will cache for future use)")
 
-    # Load tokenizer - using a math-friendly tokenizer
-    tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-medium", token=False)
+    # Load tokenizer - using a more stable tokenizer for math content
+    tokenizer = AutoTokenizer.from_pretrained("gpt2", token=False)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    
+    print(f"📝 Tokenizer vocab size: {tokenizer.vocab_size}")
 
     # Load Nemotron-CC-Math dataset - using the high-quality 4plus subset
     print("📚 Loading NVIDIA Nemotron-CC-Math dataset...")
@@ -178,7 +183,10 @@ def load_and_cache_data(config: ModelConfig, cache_dir: str = "data_cache"):
 
     tokens = all_tokens[:config.max_tokens]
     print(f"✨ Using {len(tokens):,} math tokens")
+    
+    # Ensure vocab size is properly set
     config.vocab_size = tokenizer.vocab_size
+    print(f"🔤 Final vocab size: {config.vocab_size}")
 
     # Cache the processed data
     cached_data = {'texts': texts, 'tokenizer': tokenizer, 'tokens': tokens}
@@ -568,6 +576,12 @@ if __name__ == "__main__":
 
     # Load data
     texts, tokenizer, tokens = load_and_cache_data(config)
+    
+    # Ensure vocab size is set before creating dataset/model
+    if config.vocab_size is None:
+        config.vocab_size = tokenizer.vocab_size
+        print(f"⚠️ Vocab size was None, setting to {config.vocab_size}")
+    
     dataset = TextTokenDataset(tokens, config.max_seq_len)
 
     # Train/val split
@@ -577,8 +591,8 @@ if __name__ == "__main__":
         dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42)
     )
 
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=0)
 
     print(f"📊 Dataset: {len(train_dataset)} train, {len(val_dataset)} val samples")
 
