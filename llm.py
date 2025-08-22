@@ -50,9 +50,9 @@ class ModelConfig:
     num_documents: int = 5000  # More documents for better math coverage
     max_tokens: int = 2000000  # Increased for richer math training
 
-    # Evaluation
-    eval_every: int = 500
-    eval_steps: int = 100
+    # Evaluation - adjusted for shorter training
+    eval_every: int = 50  # Evaluate more frequently for shorter runs
+    eval_steps: int = 50
 
     # Regularization
     weight_decay: float = 0.1
@@ -437,6 +437,17 @@ def train_model(config: ModelConfig, train_loader: DataLoader, val_loader: DataL
     start_time = time.time()
     best_val_loss = float('inf')
 
+    # Initial validation to establish baseline
+    print("🔍 Running initial validation...")
+    initial_eval = evaluate_model(model, val_loader, config)
+    wandb.log({
+        "val/loss": initial_eval['val_loss'],
+        "val/accuracy": initial_eval['val_accuracy'],
+        "val/perplexity": initial_eval['val_perplexity'],
+    }, step=0)
+    best_val_loss = initial_eval['val_loss']
+    print(f"Initial - Val Loss: {initial_eval['val_loss']:.4f}, Val Acc: {initial_eval['val_accuracy']:.4f}, Val PPL: {initial_eval['val_perplexity']:.2f}")
+
     pbar = tqdm(total=config.max_steps, desc="Training")
 
     while step < config.max_steps:
@@ -480,8 +491,8 @@ def train_model(config: ModelConfig, train_loader: DataLoader, val_loader: DataL
                     for scheduler in schedulers:
                         scheduler.step()
 
-            # Logging
-            if step % 100 == 0:
+            # Logging - more frequent for shorter runs
+            if step % 25 == 0:
                 with torch.no_grad():
                     predictions = logits.argmax(dim=-1)
                     accuracy = (predictions == y).float().mean().item()
@@ -495,8 +506,7 @@ def train_model(config: ModelConfig, train_loader: DataLoader, val_loader: DataL
                     "train/accuracy": accuracy,
                     "train/perplexity": perplexity,
                     "train/learning_rate": current_lr,
-                    "train/step": step
-                })
+                }, step=step)
 
                 pbar.set_postfix({
                     'loss': f'{current_loss:.4f}',
@@ -517,12 +527,11 @@ def train_model(config: ModelConfig, train_loader: DataLoader, val_loader: DataL
                     "val/loss": eval_metrics['val_loss'],
                     "val/accuracy": eval_metrics['val_accuracy'],
                     "val/perplexity": eval_metrics['val_perplexity'],
-                    "val/step": step
-                })
+                }, step=step)
 
                 if eval_metrics['val_loss'] < best_val_loss:
                     best_val_loss = eval_metrics['val_loss']
-                    wandb.log({"val/best_loss": best_val_loss})
+                    wandb.log({"val/best_loss": best_val_loss}, step=step)
 
             step += 1
             if step % 100 == 0:
@@ -545,7 +554,7 @@ def train_model(config: ModelConfig, train_loader: DataLoader, val_loader: DataL
         "final/perplexity": final_eval['val_perplexity'],
         "final/training_time_minutes": training_time / 60,
         "final/steps_completed": step
-    })
+    }, step=step)
 
     # Save model summary
     wandb.watch(model, log="all", log_freq=1000)
